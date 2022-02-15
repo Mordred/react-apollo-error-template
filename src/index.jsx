@@ -2,85 +2,105 @@
 import {
   GraphQLSchema,
   GraphQLObjectType,
-  GraphQLID,
-  GraphQLString,
-  GraphQLList,
-} from 'graphql';
-const PersonType = new GraphQLObjectType({
-  name: 'Person',
-  fields: {
-    id: { type: GraphQLID },
-    name: { type: GraphQLString },
-  },
-});
+  GraphQLInt,
+} from "graphql";
 
-const peopleData = [
-  { id: 1, name: 'John Smith' },
-  { id: 2, name: 'Sara Smith' },
-  { id: 3, name: 'Budd Deey' },
-];
+let tick = 0;
+setInterval(() => {
+  tick++;
+}, 1000);
+
+function delay(wait) {
+  return new Promise((resolve) => setTimeout(resolve, wait));
+}
 
 const QueryType = new GraphQLObjectType({
-  name: 'Query',
+  name: "Query",
   fields: {
-    people: {
-      type: new GraphQLList(PersonType),
-      resolve: () => peopleData,
+    tick: {
+      type: GraphQLInt,
+      resolve: () => tick,
     },
   },
 });
 
-const MutationType = new GraphQLObjectType({
-  name: 'Mutation',
+const SubscriptionType = new GraphQLObjectType({
+  name: "Subscription",
   fields: {
-    addPerson: {
-      type: PersonType,
-      args: {
-        name: { type: GraphQLString },
-      },
-      resolve: function (_, { name }) {
-        const person = {
-          id: peopleData[peopleData.length - 1].id + 1,
-          name,
-        };
-
-        peopleData.push(person);
-        return person;
-      }
+    ticked: {
+      type: GraphQLInt,
+      resolve: () => tick,
     },
   },
 });
 
-const schema = new GraphQLSchema({ query: QueryType, mutation: MutationType });
+const schema = new GraphQLSchema({
+  query: QueryType,
+  subscription: SubscriptionType,
+});
 
 /*** LINK ***/
 import { graphql, print } from "graphql";
 import { ApolloLink, Observable } from "@apollo/client";
-function delay(wait) {
-  return new Promise(resolve => setTimeout(resolve, wait));
-}
-
-const link = new ApolloLink(operation => {
-  return new Observable(async observer => {
+import { getMainDefinition } from "@apollo/client/utilities";
+const link = new ApolloLink((operation) => {
+  return new Observable((observer) => {
+    let timer;
+    const execute = async () => {
     const { query, operationName, variables } = operation;
     await delay(300);
+
+    const definition = getMainDefinition(query);
     try {
-      const result = await graphql({
-        schema,
-        source: print(query),
-        variableValues: variables,
-        operationName,
-      });
-      observer.next(result);
-      observer.complete();
+      if (
+        definition.kind === "OperationDefinition" &&
+        definition.operation === "subscription"
+      ) {
+        observer.next(
+          await graphql({
+            schema,
+            source: print(query),
+            variableValues: variables,
+            operationName,
+          })
+        );
+        timer = setInterval(async () => {
+          console.log('tick from server');
+          observer.next(
+            await graphql({
+              schema,
+              source: print(query),
+              variableValues: variables,
+              operationName,
+            })
+          );
+        }, 1000);
+      } else {
+        const result = await graphql({
+          schema,
+          source: print(query),
+          variableValues: variables,
+          operationName,
+        });
+        observer.next(result);
+        observer.complete();
+      }
     } catch (err) {
       observer.error(err);
     }
+  }
+
+  execute();
+
+  return () => {
+    clearInterval(timer);
+  }
+
   });
 });
 
 /*** APP ***/
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { render } from "react-dom";
 import {
   ApolloClient,
@@ -88,51 +108,11 @@ import {
   InMemoryCache,
   gql,
   useQuery,
-  useMutation,
 } from "@apollo/client";
 import "./index.css";
 
-const ALL_PEOPLE = gql`
-  query AllPeople {
-    people {
-      id
-      name
-    }
-  }
-`;
-
-const ADD_PERSON = gql`
-  mutation AddPerson($name: String) {
-    addPerson(name: $name) {
-      id
-      name
-    }
-  }
-`;
-
 function App() {
-  const [name, setName] = useState('');
-  const {
-    loading,
-    data,
-  } = useQuery(ALL_PEOPLE);
-
-  const [addPerson] = useMutation(ADD_PERSON, {
-    update: (cache, { data: { addPerson: addPersonData } }) => {
-      const peopleResult = cache.readQuery({ query: ALL_PEOPLE });
-
-      cache.writeQuery({
-        query: ALL_PEOPLE,
-        data: {
-          ...peopleResult,
-          people: [
-            ...peopleResult.people,
-            addPersonData,
-          ],
-        },
-      });
-    },
-  });
+  const [showTick, setShowTick] = useState(true);
 
   return (
     <main>
@@ -140,40 +120,64 @@ function App() {
       <p>
         This application can be used to demonstrate an error in Apollo Client.
       </p>
-      <div className="add-person">
-        <label htmlFor="name">Name</label>
-        <input
-          type="text"
-          name="name"
-          value={name}
-          onChange={evt => setName(evt.target.value)}
-        />
-        <button
-          onClick={() => {
-            addPerson({ variables: { name } });
-            setName('');
-          }}
-        >
-          Add person
-        </button>
-      </div>
-      <h2>Names</h2>
-      {loading ? (
-        <p>Loading…</p>
-      ) : (
-        <ul>
-          {data?.people.map(person => (
-            <li key={person.id}>{person.name}</li>
-          ))}
-        </ul>
-      )}
+
+      <button
+        onClick={() => {
+          setShowTick((s) => !s);
+        }}
+      >
+        {showTick ? "Hide" : "Show"}
+      </button>
+
+      {showTick && <Tick />}
     </main>
   );
 }
 
+const TICK_QUERY = gql`
+  query Tick {
+    tick
+  }
+`;
+
+const TICK_SUBSCRIPTION = gql`
+  subscription Ticked {
+    ticked
+  }
+`;
+
+function Tick() {
+  const { data, subscribeToMore } = useQuery(TICK_QUERY);
+
+  useEffect(() => {
+    return subscribeToMore({
+      document: TICK_SUBSCRIPTION,
+      updateQuery: (prev, { subscriptionData }) => {
+        return {
+          ...prev,
+          tick: subscriptionData.data.ticked,
+        };
+      },
+    });
+  }, []);
+
+  return <div style={{ marginTop: '1em', fontSize: '3rem', color: "green" }}>{data?.tick}</div>;
+}
+
+const SSR_CACHE_DATA = {
+  "ROOT_QUERY": {
+    "__typename": "Query",
+    "tick": 0
+  },
+}
+
+const cache = new InMemoryCache();
+cache.restore(SSR_CACHE_DATA);
+
 const client = new ApolloClient({
-  cache: new InMemoryCache(),
-  link
+  cache,
+  link,
+  ssrForceFetchDelay: 100,
 });
 
 render(
